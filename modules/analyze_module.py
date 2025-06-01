@@ -1690,30 +1690,94 @@ def render_analyze_tab():
 
     with main_tabs[2]:
         st.markdown("### Code Smells")
-        smell_tabs = st.tabs(["File-Level Code Smells", "Project-Level Code Smells"])
+        smell_tabs = st.tabs(["All Code Smells in Project", "Code Smells in Selected File"])
         all_files = [f["name"] for f in files]
         file_contents = {f["name"]: (f["content"].decode("utf-8", errors="ignore") if "content" in f else "") for f in files}
         project_stats = compute_project_stats(all_files, file_contents)
-        # --- File-Level Code Smells ---
+        # --- Tab 1: All Code Smells in Project ---
         with smell_tabs[0]:
+            if "all_smells" not in st.session_state:
+                st.session_state["all_smells"] = None
+            if st.button("Analyze All Files for Code Smells"):
+                st.session_state["all_smells"] = None  # Reset before running
+                all_smells = []
+                progress = st.progress(0, text="Analyzing files...")
+                debug_area = st.empty()
+                for i, fname in enumerate(all_files):
+                    fcode = file_contents[fname]
+                    debug_area.info(f"Analyzing: {fname} ({i+1}/{len(all_files)})")
+                    try:
+                        smells = detect_code_smells(fcode, fname, all_files, file_contents, project_stats)
+                        all_smells.extend(smells)
+                    except Exception as e:
+                        debug_area.error(f"Error analyzing {fname}: {e}")
+                    progress.progress((i+1)/len(all_files), text=f"{i+1} of {len(all_files)} files analyzed")
+                progress.empty()
+                debug_area.empty()
+                st.session_state["all_smells"] = all_smells
+            if st.session_state["all_smells"] is not None:
+                all_smells = st.session_state["all_smells"]
+                if not all_smells:
+                    st.success("No significant code smells detected in the project.")
+                else:
+                    df = pd.DataFrame(all_smells)
+                    # --- Summary Cards ---
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Total Code Smells", len(df))
+                    col2.metric("Files with Smells", df['File Name'].nunique())
+                    most_common = df['Type of Code Smell'].mode()[0] if not df.empty else "-"
+                    col3.metric("Most Common Smell", most_common)
+                    
+                    if not df.empty:
+                        fig = px.pie(df, names='Type of Code Smell', title='Code Smell Distribution', hole=0.4)
+                        st.plotly_chart(fig, use_container_width=True)
+                    # --- Filters ---
+                    min_confidence = st.slider("Minimum Confidence", 0.0, 1.0, 0.7, 0.05, key="proj_confidence")
+                    all_types = df["Type of Code Smell"].unique().tolist()
+                    selected_types = st.multiselect("Show only these code smell types:", all_types, default=all_types, key="proj_types")
+                    filtered_df = df[(df["Confidence"] >= min_confidence) & (df["Type of Code Smell"].isin(selected_types))]
+                    st.dataframe(filtered_df, use_container_width=True)
+                    st.download_button("Download Project Code Smell Report (CSV)", data=filtered_df.to_csv(index=False), file_name="project_code_smell_report.csv", mime="text/csv")
+                    st.download_button("Download Project Code Smell Report (JSON)", data=filtered_df.to_json(orient='records', indent=2), file_name="project_code_smell_report.json", mime="application/json")
+            else:
+                st.info("Click the button above to analyze all files for code smells.")
+
+        # --- Tab 2: Code Smells in Selected File ---
+        with smell_tabs[1]:
             smell_report = detect_code_smells(code_content, selected_file, all_files, file_contents, project_stats)
             if not smell_report:
-                st.success("No significant code smells detected.")
+                st.success("No code smells detected in the selected file.")
             else:
-                st.dataframe(smell_report, use_container_width=True)
-                st.download_button("Download Code Smell Report (CSV)", data=pd.DataFrame(smell_report).to_csv(index=False), file_name="code_smell_report.csv", mime="text/csv")
-                st.download_button("Download Code Smell Report (JSON)", data=json.dumps(smell_report, indent=2), file_name="code_smell_report.json", mime="application/json")
-        # --- Project-Level Code Smells ---
-        with smell_tabs[1]:
-            st.info("Aggregating code smells for all files in the project...")
-            all_smells = []
-            for fname in all_files:
-                fcode = file_contents[fname]
-                smells = detect_code_smells(fcode, fname, all_files, file_contents, project_stats)
-                all_smells.extend(smells)
-            if not all_smells:
-                st.success("No significant code smells detected in the project.")
-            else:
-                st.dataframe(all_smells, use_container_width=True)
-                st.download_button("Download Project Code Smell Report (CSV)", data=pd.DataFrame(all_smells).to_csv(index=False), file_name="project_code_smell_report.csv", mime="text/csv")
-                st.download_button("Download Project Code Smell Report (JSON)", data=json.dumps(all_smells, indent=2), file_name="project_code_smell_report.json", mime="application/json")  
+                st.markdown(f"### Code Smells in `{selected_file}`")
+                st.write(f"**Total code smells:** {len(smell_report)}")
+                df = pd.DataFrame(smell_report)
+                # --- Summary Cards ---
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Code Smells", len(df))
+                col2.metric("Type Count", df['Type of Code Smell'].nunique())
+                most_common = df['Type of Code Smell'].mode()[0] if not df.empty else "-"
+                col3.metric("Most Common Smell", most_common)
+                
+                if not df.empty:
+                    fig = px.pie(df, names='Type of Code Smell', title='Code Smell Distribution', hole=0.4)
+                    st.plotly_chart(fig, use_container_width=True)
+                # --- Filters ---
+                min_confidence = st.slider("Minimum Confidence", 0.0, 1.0, 0.7, 0.05, key="file_confidence")
+                all_types = df["Type of Code Smell"].unique().tolist()
+                selected_types = st.multiselect("Show only these code smell types:", all_types, default=all_types, key="file_types")
+                filtered_df = df[(df["Confidence"] >= min_confidence) & (df["Type of Code Smell"].isin(selected_types))]
+                category_order = [
+                    "Class-Level Code Smells",
+                    "Method-Level Code Smells",
+                    "Field-Level Code Smells",
+                    "Architecture-Level Code Smells",
+                    "Package and Dependency Smells",
+                    "Miscellaneous or General Code Smells"
+                ]
+                for category in category_order:
+                    cat_df = filtered_df[filtered_df["Category"] == category]
+                    if not cat_df.empty:
+                        with st.expander(f"{category} ({len(cat_df)})", expanded=True):
+                            st.dataframe(cat_df.drop(columns=["File Name", "Category"]), use_container_width=True)
+                st.download_button("Download Code Smell Report (CSV)", data=filtered_df.to_csv(index=False), file_name="code_smell_report_selected_file.csv", mime="text/csv")
+                st.download_button("Download Code Smell Report (JSON)", data=filtered_df.to_json(orient='records', indent=2), file_name="code_smell_report_selected_file.json", mime="application/json")
